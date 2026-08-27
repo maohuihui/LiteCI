@@ -1,0 +1,19 @@
+/target/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+*.log
+
+.DS_Store
+.idea/
+.vscode/
+
+# LiteCI runtime data
+/data/
+/workspaces/
+/artifacts/
+/logs/
