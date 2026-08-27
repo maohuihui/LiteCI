@@ -57,6 +57,13 @@ pub struct LoginResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CurrentUserResponse {
+    id: String,
+    username: String,
+    role: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorResponse {
     code: &'static str,
     message: &'static str,
@@ -246,6 +253,57 @@ pub async fn login(
         .into_response())
 }
 
+pub async fn current_user(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<CurrentUserResponse>, AuthError> {
+    let (user, _) = authenticated_user(&state, &headers).await?;
+    Ok(Json(user))
+}
+
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, AuthError> {
+    let (_, token_hash) = authenticated_user(&state, &headers).await?;
+    sqlx::query("DELETE FROM sessions WHERE token_hash = ?1")
+        .bind(token_hash)
+        .execute(&state.pool)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn authenticated_user(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(CurrentUserResponse, String), AuthError> {
+    let token = bearer_token(headers)?;
+    let token_hash = hash_token(token);
+    let user: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT users.id, users.username, users.role
+         FROM sessions
+         JOIN users ON users.id = sessions.user_id
+         WHERE sessions.token_hash = ?1 AND sessions.expires_at > ?2",
+    )
+    .bind(&token_hash)
+    .bind(OffsetDateTime::now_utc())
+    .fetch_optional(&state.pool)
+    .await?;
+    let (id, username, role) = user.ok_or(AuthError::InvalidSession)?;
+    Ok((CurrentUserResponse { id, username, role }, token_hash))
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, AuthError> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AuthError::InvalidSession)?;
+    value
+        .strip_prefix("Bearer ")
+        .filter(|token| token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or(AuthError::InvalidSession)
+}
+
 fn validate_credentials<'a>(username: &'a str, password: &str) -> Result<&'a str, AuthError> {
     let username = username.trim();
     if username.is_empty()
@@ -330,6 +388,8 @@ pub enum AuthError {
     InvalidInput,
     #[error("用户名或密码错误")]
     InvalidCredentials,
+    #[error("会话无效或已过期")]
+    InvalidSession,
     #[error("请求过于频繁")]
     RateLimited,
     #[error("无法安全处理密码")]
@@ -366,6 +426,11 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "invalid_credentials",
                 "用户名或密码错误",
+            ),
+            Self::InvalidSession => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_session",
+                "会话无效或已过期",
             ),
             Self::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
