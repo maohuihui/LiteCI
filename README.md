@@ -1,4 +1,4 @@
-# autoCI
+# LiteCI
 
 轻量级、单机优先的 Rust CI/CD 平台。当前实现是 `autoCI_需求与设计文档_v0.1.md` Phase 1 的第一个基础切片：基础 Web 服务、SQLite 迁移与最小 Project 数据模型。它不是完整的 Phase 1 验收版本。
 
