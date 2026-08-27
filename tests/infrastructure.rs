@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 
-use autoci::{StorageConfig, connect, migrate, prepare_storage};
+use liteci::{StorageConfig, connect, migrate, prepare_storage};
 use sqlx::Row;
 use uuid::Uuid;
 
 fn temp_root() -> PathBuf {
-    std::env::temp_dir().join(format!("autoci-test-{}", Uuid::new_v4()))
+    std::env::temp_dir().join(format!("liteci-test-{}", Uuid::new_v4()))
 }
 
 #[tokio::test]
 async fn every_pool_connection_enables_foreign_keys_and_wal() {
     let root = temp_root();
     std::fs::create_dir_all(&root).unwrap();
-    let database = root.join("autoci.db");
+    let database = root.join("liteci.db");
     let url = format!("sqlite://{}?mode=rwc", database.display());
     let pool = connect(&url).await.unwrap();
     migrate(&pool).await.unwrap();

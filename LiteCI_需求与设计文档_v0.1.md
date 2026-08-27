@@ -57,7 +57,7 @@ Docker Build（可选）
 
 ## 2.1 核心定位
 
-JZX DevOps 是一个：
+LiteCI 是一个：
 
 - 单机优先
 - Web 管理
@@ -198,7 +198,7 @@ Pipeline 执行命令属于高权限操作，后续必须支持 Runner / Sandbox
                                │
                                ▼
 ┌──────────────────────────────────────────────────┐
-│                  JZX DevOps                      │
+│                  LiteCI                      │
 │                                                  │
 │  ┌───────────┐   ┌───────────┐                  │
 │  │ Project   │   │ Trigger   │                  │
@@ -2343,7 +2343,7 @@ Artifact 备份
 但代码架构必须为未来 Runner 留出边界：
 
 ```text
-JZX DevOps Server
+LiteCI Server
        ↓
 Job
        ↓
@@ -2584,7 +2584,7 @@ Polling 仍然保留作为兜底。
 
 当出现以下需求时再开发：
 
-- 构建机与 JZX DevOps 不在同一台服务器
+- 构建机与 LiteCI 不在同一台服务器
 - 多台构建服务器
 - 构建任务互相影响
 - 需要 Docker 隔离
@@ -2593,7 +2593,7 @@ Polling 仍然保留作为兜底。
 架构：
 
 ```text
-JZX DevOps
+LiteCI
      ↓
 Job Queue
      ↓
@@ -3208,7 +3208,7 @@ Approval
 
 项目完成第一个可用版本后，必须能够实现以下操作：
 
-1. 浏览器访问 JZX DevOps。
+1. 浏览器访问 LiteCI。
 2. 登录。
 3. 创建项目 `jzx-website`。
 4. 输入 Gitee Git 地址。
@@ -3256,7 +3256,7 @@ dist/
 
 # 100. 最终目标
 
-JZX DevOps 最终不是 GitLab 的完整替代品。
+LiteCI 最终不是 GitLab 的完整替代品。
 
 它的目标是：
 
@@ -3265,7 +3265,7 @@ JZX DevOps 最终不是 GitLab 的完整替代品。
                        │
                        ▼
                 ┌───────────────┐
-                │  JZX DevOps   │
+                │  LiteCI   │
                 ├───────────────┤
                 │ Trigger       │
                 │ Pipeline      │

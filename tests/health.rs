@@ -1,9 +1,9 @@
-use autoci::app;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use liteci::app;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn health_endpoint_returns_service_status() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], br#"{"status":"ok","service":"autoci"}"#);
+    assert_eq!(&body[..], br#"{"status":"ok","service":"liteci"}"#);
 }
 
 #[tokio::test]
