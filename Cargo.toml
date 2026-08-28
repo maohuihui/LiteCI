@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "time"] }
 tokio-util = "0.7"
 command-group = { version = "5", features = ["with-tokio"] }

@@ -2,12 +2,14 @@ mod auth;
 mod command_executor;
 mod config;
 mod db;
+mod git;
 mod projects;
 
 pub use command_executor::{
     CommandError, CommandExecutor, CommandOutput, CommandSpec, ExecutionStatus, LogEvent, LogStream,
 };
 pub use config::{Config, StorageConfig};
+pub use git::{GitError, GitService, GitSnapshot};
 
 use axum::{
     Json, Router,
@@ -24,15 +26,21 @@ pub struct AppState {
     login_limiter: Arc<auth::LoginLimiter>,
     password_workers: Arc<Semaphore>,
     setup_token: Arc<str>,
+    workspace_root: Arc<std::path::PathBuf>,
 }
 
 impl AppState {
-    fn new(pool: SqlitePool, setup_token: impl Into<Arc<str>>) -> Self {
+    fn new(
+        pool: SqlitePool,
+        setup_token: impl Into<Arc<str>>,
+        workspace_root: impl Into<std::path::PathBuf>,
+    ) -> Self {
         Self {
             pool,
             login_limiter: Arc::new(auth::LoginLimiter::default()),
             password_workers: Arc::new(Semaphore::new(4)),
             setup_token: setup_token.into(),
+            workspace_root: Arc::new(workspace_root.into()),
         }
     }
 }
@@ -55,10 +63,18 @@ pub fn app() -> Router {
 }
 
 pub fn app_with_state(pool: SqlitePool) -> Router {
-    app_with_setup_token(pool, "test-setup-token")
+    app_with_setup_token_and_workspace(pool, "test-setup-token", ".")
 }
 
 pub fn app_with_setup_token(pool: SqlitePool, setup_token: impl Into<Arc<str>>) -> Router {
+    app_with_setup_token_and_workspace(pool, setup_token, ".")
+}
+
+pub fn app_with_setup_token_and_workspace(
+    pool: SqlitePool,
+    setup_token: impl Into<Arc<str>>,
+    workspace_root: impl Into<std::path::PathBuf>,
+) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/auth/setup", post(auth::setup))
@@ -72,7 +88,8 @@ pub fn app_with_setup_token(pool: SqlitePool, setup_token: impl Into<Arc<str>>) 
                 .put(projects::update)
                 .delete(projects::delete),
         )
-        .with_state(AppState::new(pool, setup_token))
+        .route("/api/projects/{id}/sync", post(projects::sync))
+        .with_state(AppState::new(pool, setup_token, workspace_root))
 }
 
 pub use db::{connect, migrate};

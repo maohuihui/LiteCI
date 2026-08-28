@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use liteci::{Config, app_with_setup_token, connect, migrate, prepare_storage};
+use liteci::{Config, app_with_setup_token_and_workspace, connect, migrate, prepare_storage};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -30,7 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%address, "liteci server started");
     axum::serve(
         listener,
-        app_with_setup_token(pool, setup_token).into_make_service_with_connect_info::<SocketAddr>(),
+        app_with_setup_token_and_workspace(pool, setup_token, &config.storage.workspace)
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())

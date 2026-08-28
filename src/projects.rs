@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::{AppState, auth};
+use crate::{AppState, GitService, auth};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +187,44 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[axum::debug_handler]
+pub async fn sync(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<crate::GitSnapshot>, ProjectError> {
+    auth::authenticated_user(&state, &headers).await?;
+    let project = find(&state.pool, &id)
+        .await?
+        .ok_or(ProjectError::NotFound)?;
+    let workspace_relative = safe_workspace_path(&project.workspace_path)?;
+    let workspace = state.workspace_root.join(workspace_relative);
+    let snapshot = GitService::new(crate::CommandExecutor::new())
+        .sync(
+            &project.git_url,
+            &project.default_branch,
+            workspace,
+            CancellationToken::new(),
+        )
+        .await?;
+    Ok(Json(snapshot))
+}
+
+fn safe_workspace_path(value: &str) -> Result<&std::path::Path, ProjectError> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(ProjectError::InvalidWorkspace);
+    }
+    Ok(path)
+}
+
 async fn find(pool: &SqlitePool, id: &str) -> Result<Option<Project>, sqlx::Error> {
     sqlx::query_as::<_, Project>(
         "SELECT id, name, description, git_url, default_branch, status, workspace_path, created_at, updated_at FROM projects WHERE id = ?1",
@@ -307,6 +346,10 @@ pub enum ProjectError {
     Conflict,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Git(#[from] crate::GitError),
+    #[error("项目工作目录无效")]
+    InvalidWorkspace,
 }
 
 impl From<auth::AuthError> for ProjectError {
@@ -338,7 +381,26 @@ impl axum::response::IntoResponse for ProjectError {
                 "internal_error",
                 "服务暂时无法完成请求",
             ),
+            Self::Git(_) => (StatusCode::BAD_GATEWAY, "git_error", "Git 操作失败"),
+            Self::InvalidWorkspace => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_workspace",
+                "项目工作目录无效",
+            ),
         };
         (status, Json(ErrorResponse { code, message })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_workspace_path;
+
+    #[test]
+    fn workspace_path_must_remain_relative_and_normal() {
+        assert!(safe_workspace_path("workspaces/project").is_ok());
+        assert!(safe_workspace_path("../outside").is_err());
+        assert!(safe_workspace_path("C:/outside").is_err());
+        assert!(safe_workspace_path("/outside").is_err());
     }
 }
