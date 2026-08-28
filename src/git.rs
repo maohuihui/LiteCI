@@ -63,6 +63,8 @@ impl GitService {
             .await?;
         }
         if workspace_is_repository {
+            self.verify_origin(repository, &workspace, cancellation.clone())
+                .await?;
             self.run_git(
                 &["checkout", "--force", branch],
                 &workspace,
@@ -75,6 +77,8 @@ impl GitService {
                 cancellation.clone(),
             )
             .await?;
+            self.run_git(&["clean", "-ffdx"], &workspace, cancellation.clone())
+                .await?;
         }
         let sha = self
             .git_output(&["rev-parse", "HEAD"], &workspace, cancellation.clone())
@@ -153,6 +157,21 @@ impl GitService {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+
+    async fn verify_origin(
+        &self,
+        repository: &str,
+        directory: &Path,
+        cancellation: CancellationToken,
+    ) -> Result<(), GitError> {
+        let origin = self
+            .git_output(&["remote", "get-url", "origin"], directory, cancellation)
+            .await?;
+        if !same_repository(repository, origin.trim()) {
+            return Err(GitError::RepositoryMismatch);
+        }
+        Ok(())
+    }
 }
 
 fn path_string(path: &Path) -> String {
@@ -171,6 +190,19 @@ fn workspace_parent(path: &Path) -> PathBuf {
     path.parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn same_repository(expected: &str, actual: &str) -> bool {
+    if expected == actual {
+        return true;
+    }
+    if let (Ok(expected), Ok(actual)) = (
+        Path::new(expected).canonicalize(),
+        Path::new(actual).canonicalize(),
+    ) {
+        return expected == actual;
+    }
+    expected.trim_end_matches(".git") == actual.trim_end_matches(".git")
 }
 
 fn validate_ref(value: &str) -> Result<(), GitError> {
@@ -201,6 +233,8 @@ pub enum GitError {
     InvalidRepository,
     #[error("Git 引用无效")]
     InvalidRef,
+    #[error("Git 工作区来源与项目仓库不一致")]
+    RepositoryMismatch,
     #[error("Git 命令执行失败: {stderr}")]
     CommandFailed {
         status: ExecutionStatus,
