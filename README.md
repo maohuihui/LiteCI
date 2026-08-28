@@ -1,8 +1,8 @@
 # LiteCI
 
-轻量级、单机优先的 Rust CI/CD 平台。当前实现正在推进 `LiteCI_需求与设计文档_v0.1.md`：已具备基础 Web 服务、SQLite 迁移、存储初始化、首位管理员安全初始化、登录会话、受保护的 Project CRUD，以及统一的本地 CommandExecutor。它不是完整的 Phase 1 验收版本。
+轻量级、单机优先的 Rust CI/CD 平台。当前实现正在推进 `LiteCI_需求与设计文档_v0.1.md`：已具备基础 Web 服务、SQLite 迁移、存储初始化、首位管理员安全初始化、登录会话、受保护的 Project CRUD，以及支持有界实时日志事件的本地 CommandExecutor。它不是完整的 Phase 1 验收版本。
 
-尚未实现 CSRF、凭证、Runtime、Pipeline、Artifact、SSH/SFTP、部署、实时日志和历史；命令执行器目前仅作为内部基础设施，尚未通过 Web API 暴露。
+尚未实现 CSRF、凭证、Runtime、Pipeline、Artifact、SSH/SFTP、部署、日志持久化和历史；命令执行器目前仅作为内部基础设施，尚未通过 Web API 暴露。
 
 ## 本地运行
 

@@ -5,7 +5,7 @@ mod db;
 mod projects;
 
 pub use command_executor::{
-    CommandError, CommandExecutor, CommandOutput, CommandSpec, ExecutionStatus,
+    CommandError, CommandExecutor, CommandOutput, CommandSpec, ExecutionStatus, LogEvent, LogStream,
 };
 pub use config::{Config, StorageConfig};
 

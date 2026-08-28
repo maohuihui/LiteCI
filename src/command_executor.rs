@@ -4,6 +4,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
+    sync::mpsc,
     task::JoinHandle,
     time::Instant,
 };
@@ -32,6 +33,18 @@ pub enum ExecutionStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEvent {
+    pub stream: LogStream,
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub status: ExecutionStatus,
@@ -54,6 +67,24 @@ impl CommandExecutor {
         &self,
         spec: CommandSpec,
         cancellation: CancellationToken,
+    ) -> Result<CommandOutput, CommandError> {
+        self.execute_inner(spec, cancellation, None).await
+    }
+
+    pub async fn execute_with_logs(
+        &self,
+        spec: CommandSpec,
+        cancellation: CancellationToken,
+        logs: mpsc::Sender<LogEvent>,
+    ) -> Result<CommandOutput, CommandError> {
+        self.execute_inner(spec, cancellation, Some(logs)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        spec: CommandSpec,
+        cancellation: CancellationToken,
+        logs: Option<mpsc::Sender<LogEvent>>,
     ) -> Result<CommandOutput, CommandError> {
         validate_spec(&spec)?;
         if cancellation.is_cancelled() {
@@ -82,8 +113,8 @@ impl CommandExecutor {
             .stderr
             .take()
             .ok_or(CommandError::MissingPipe)?;
-        let mut stdout_task = spawn_capture(stdout);
-        let mut stderr_task = spawn_capture(stderr);
+        let mut stdout_task = spawn_capture(stdout, logs.clone(), LogStream::Stdout);
+        let mut stderr_task = spawn_capture(stderr, logs, LogStream::Stderr);
         let deadline = Instant::now() + spec.timeout;
 
         let process = wait_for_group(&mut child, deadline, &cancellation).await?;
@@ -117,8 +148,14 @@ impl CommandExecutor {
     }
 }
 
-fn spawn_capture(mut reader: impl AsyncRead + Unpin + Send + 'static) -> CaptureTask {
-    tokio::spawn(async move { read_bounded(&mut reader, MAX_CAPTURED_STREAM_BYTES).await })
+fn spawn_capture(
+    mut reader: impl AsyncRead + Unpin + Send + 'static,
+    logs: Option<mpsc::Sender<LogEvent>>,
+    stream: LogStream,
+) -> CaptureTask {
+    tokio::spawn(
+        async move { read_bounded(&mut reader, MAX_CAPTURED_STREAM_BYTES, logs, stream).await },
+    )
 }
 
 async fn wait_for_group(
@@ -188,6 +225,8 @@ fn flatten_capture(
 async fn read_bounded(
     reader: &mut (impl AsyncRead + Unpin),
     limit: usize,
+    logs: Option<mpsc::Sender<LogEvent>>,
+    stream: LogStream,
 ) -> std::io::Result<(Vec<u8>, bool)> {
     let mut retained = Vec::with_capacity(limit.min(8192));
     let mut buffer = [0_u8; 8192];
@@ -196,6 +235,12 @@ async fn read_bounded(
         let count = reader.read(&mut buffer).await?;
         if count == 0 {
             break;
+        }
+        if let Some(sender) = &logs {
+            let _ = sender.try_send(LogEvent {
+                stream,
+                data: buffer[..count].to_vec(),
+            });
         }
         let remaining = limit.saturating_sub(retained.len());
         let retained_count = remaining.min(count);
