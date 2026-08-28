@@ -1,8 +1,12 @@
 mod auth;
+mod command_executor;
 mod config;
 mod db;
 mod projects;
 
+pub use command_executor::{
+    CommandError, CommandExecutor, CommandOutput, CommandSpec, ExecutionStatus,
+};
 pub use config::{Config, StorageConfig};
 
 use axum::{
