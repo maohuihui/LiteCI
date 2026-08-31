@@ -347,11 +347,19 @@ fn shell_quote(value: &str) -> String {
 fn path_string(path: &Path) -> String {
     #[cfg(windows)]
     {
-        let value = path.to_string_lossy();
-        value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+        windows_native_path(&path.to_string_lossy())
     }
     #[cfg(not(windows))]
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+fn windows_native_path(value: &str) -> String {
+    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{path}")
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(value).to_owned()
+    }
 }
 
 #[cfg(unix)]
@@ -405,6 +413,21 @@ fn validate_ref(value: &str) -> Result<(), GitError> {
         return Err(GitError::InvalidRef);
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::windows_native_path;
+
+    #[test]
+    fn normalizes_windows_extended_paths_without_corrupting_unc_paths() {
+        assert_eq!(
+            windows_native_path(r"\\?\UNC\server\share\repo"),
+            r"\\server\share\repo"
+        );
+        assert_eq!(windows_native_path(r"\\?\C:\work\repo"), r"C:\work\repo");
+        assert_eq!(windows_native_path(r"C:\work\repo"), r"C:\work\repo");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
