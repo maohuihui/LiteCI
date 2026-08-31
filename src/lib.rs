@@ -6,6 +6,7 @@ mod credential_store;
 mod credentials;
 mod db;
 mod git;
+mod pipeline_engine;
 mod pipeline_runs;
 mod pipelines;
 mod projects;
@@ -19,6 +20,7 @@ pub use credential_store::{
 };
 pub use credentials::{CredentialCipher, CredentialError};
 pub use git::{GitCredential, GitError, GitService, GitSnapshot};
+pub use pipeline_engine::PipelineEngine;
 
 use axum::{
     Json, Router,
