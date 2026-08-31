@@ -17,6 +17,7 @@ pub struct CreateProject {
     description: Option<String>,
     git_url: String,
     default_branch: Option<String>,
+    git_auth_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +27,16 @@ pub struct UpdateProject {
     description: Option<String>,
     git_url: Option<String>,
     default_branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_field")]
+    git_auth_id: Option<Option<String>>,
     status: Option<String>,
+}
+
+fn deserialize_nullable_field<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -40,6 +50,7 @@ pub struct Project {
     pub workspace_path: String,
     pub created_at: String,
     pub updated_at: String,
+    pub git_auth_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,7 +65,7 @@ pub async fn list(
 ) -> Result<Json<Vec<Project>>, ProjectError> {
     auth::authenticated_user(&state, &headers).await?;
     let projects = sqlx::query_as::<_, Project>(
-        "SELECT id, name, description, git_url, default_branch, status, workspace_path, created_at, updated_at
+        "SELECT id, name, description, git_url, default_branch, status, workspace_path, created_at, updated_at, git_auth_id
          FROM projects ORDER BY name ASC",
     )
     .fetch_all(&state.pool)
@@ -90,7 +101,7 @@ pub async fn create(
     let id = Uuid::new_v4().to_string();
     let workspace_path = format!("workspaces/{id}");
     sqlx::query(
-        "INSERT INTO projects (id, name, description, git_url, default_branch, workspace_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO projects (id, name, description, git_url, default_branch, workspace_path, git_auth_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(&id)
     .bind(name)
@@ -98,6 +109,7 @@ pub async fn create(
     .bind(git_url)
     .bind(branch)
     .bind(workspace_path)
+    .bind(input.git_auth_id)
     .execute(&state.pool)
     .await
     .map_err(map_db_error)?;
@@ -123,6 +135,7 @@ pub async fn update(
         && input.git_url.is_none()
         && input.default_branch.is_none()
         && input.status.is_none()
+        && input.git_auth_id.is_none()
     {
         return Err(ProjectError::InvalidInput);
     }
@@ -149,17 +162,23 @@ pub async fn update(
         .unwrap_or(current.default_branch.as_str());
     let description = input.description.as_deref().unwrap_or(&current.description);
     let status = input.status.as_deref().unwrap_or(&current.status);
+    let git_auth_id = input
+        .git_auth_id
+        .as_ref()
+        .map(|value| value.as_deref())
+        .unwrap_or(current.git_auth_id.as_deref());
     if description.len() > 2000 || !matches!(status, "active" | "disabled") {
         return Err(ProjectError::InvalidInput);
     }
     sqlx::query(
-        "UPDATE projects SET name = ?1, description = ?2, git_url = ?3, default_branch = ?4, status = ?5, updated_at = CURRENT_TIMESTAMP WHERE id = ?6",
+        "UPDATE projects SET name = ?1, description = ?2, git_url = ?3, default_branch = ?4, status = ?5, git_auth_id = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
     )
     .bind(name)
     .bind(description)
     .bind(git_url)
     .bind(branch)
     .bind(status)
+    .bind(git_auth_id)
     .bind(&id)
     .execute(&state.pool)
     .await
@@ -199,15 +218,75 @@ pub async fn sync(
         .ok_or(ProjectError::NotFound)?;
     let workspace_relative = safe_workspace_path(&project.workspace_path)?;
     let workspace = state.workspace_root.join(workspace_relative);
-    let snapshot = GitService::new(crate::CommandExecutor::new())
-        .sync(
-            &project.git_url,
-            &project.default_branch,
-            workspace,
-            CancellationToken::new(),
-        )
-        .await?;
+    let credential = if let Some(id) = project.git_auth_id.as_deref() {
+        let store = state
+            .credentials
+            .as_ref()
+            .ok_or(ProjectError::CredentialUnavailable)?;
+        let kind = store.kind(id).await.map_err(ProjectError::Credential)?;
+        let payload = store.decrypt(id).await.map_err(ProjectError::Credential)?;
+        if project.git_url.starts_with("git@") || project.git_url.starts_with("ssh://") {
+            if kind != crate::CredentialKind::SshKey {
+                return Err(ProjectError::CredentialInvalid);
+            }
+            Some(crate::GitCredential::SshKey {
+                private_key: String::from_utf8(payload)
+                    .map_err(|_| ProjectError::CredentialInvalid)?,
+            })
+        } else {
+            if kind != crate::CredentialKind::HttpsToken {
+                return Err(ProjectError::CredentialInvalid);
+            }
+            let payload =
+                String::from_utf8(payload).map_err(|_| ProjectError::CredentialInvalid)?;
+            let (username, token) = parse_https_credential(&payload)?;
+            Some(crate::GitCredential::HttpsToken { username, token })
+        }
+    } else {
+        None
+    };
+    let snapshot = if let Some(credential) = credential {
+        GitService::new(crate::CommandExecutor::new())
+            .sync_with_credential(
+                &project.git_url,
+                &project.default_branch,
+                workspace,
+                CancellationToken::new(),
+                credential,
+            )
+            .await?
+    } else {
+        GitService::new(crate::CommandExecutor::new())
+            .sync(
+                &project.git_url,
+                &project.default_branch,
+                workspace,
+                CancellationToken::new(),
+            )
+            .await?
+    };
     Ok(Json(snapshot))
+}
+
+fn parse_https_credential(value: &str) -> Result<(String, String), ProjectError> {
+    let mut username = None;
+    let mut token = None;
+    for line in value.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "username" => username = Some(value.to_owned()),
+            "token" => token = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    match (username, token) {
+        (Some(username), Some(token)) if !username.is_empty() && !token.is_empty() => {
+            Ok((username, token))
+        }
+        _ => Err(ProjectError::CredentialInvalid),
+    }
 }
 
 fn safe_workspace_path(value: &str) -> Result<&std::path::Path, ProjectError> {
@@ -227,7 +306,7 @@ fn safe_workspace_path(value: &str) -> Result<&std::path::Path, ProjectError> {
 
 async fn find(pool: &SqlitePool, id: &str) -> Result<Option<Project>, sqlx::Error> {
     sqlx::query_as::<_, Project>(
-        "SELECT id, name, description, git_url, default_branch, status, workspace_path, created_at, updated_at FROM projects WHERE id = ?1",
+        "SELECT id, name, description, git_url, default_branch, status, workspace_path, created_at, updated_at, git_auth_id FROM projects WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -348,6 +427,12 @@ pub enum ProjectError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Git(#[from] crate::GitError),
+    #[error(transparent)]
+    Credential(#[from] crate::CredentialStoreError),
+    #[error("凭证存储尚未配置")]
+    CredentialUnavailable,
+    #[error("凭证内容无效")]
+    CredentialInvalid,
     #[error("项目工作目录无效")]
     InvalidWorkspace,
 }
@@ -382,6 +467,11 @@ impl axum::response::IntoResponse for ProjectError {
                 "服务暂时无法完成请求",
             ),
             Self::Git(_) => (StatusCode::BAD_GATEWAY, "git_error", "Git 操作失败"),
+            Self::Credential(_) | Self::CredentialUnavailable | Self::CredentialInvalid => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "credential_error",
+                "凭证不可用",
+            ),
             Self::InvalidWorkspace => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid_workspace",

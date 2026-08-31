@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 
-use liteci::{Config, app_with_setup_token_and_workspace, connect, migrate, prepare_storage};
+use liteci::{
+    Config, CredentialCipher, app_with_setup_token_workspace_and_cipher, connect, migrate,
+    prepare_storage,
+};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -30,8 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%address, "liteci server started");
     axum::serve(
         listener,
-        app_with_setup_token_and_workspace(pool, setup_token, &config.storage.workspace)
-            .into_make_service_with_connect_info::<SocketAddr>(),
+        app_with_setup_token_workspace_and_cipher(
+            pool,
+            setup_token,
+            &config.storage.workspace,
+            credential_cipher(&config)?,
+        )
+        .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())
@@ -42,4 +50,14 @@ fn generate_setup_token() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn credential_cipher(config: &Config) -> Result<CredentialCipher, &'static str> {
+    let value = config
+        .credential_key
+        .as_deref()
+        .ok_or("LITECI_CREDENTIAL_KEY is required")?;
+    let key = hex::decode(value).map_err(|_| "LITECI_CREDENTIAL_KEY must be 64 hex characters")?;
+    CredentialCipher::from_key_bytes(&key)
+        .map_err(|_| "LITECI_CREDENTIAL_KEY must be 64 hex characters")
 }

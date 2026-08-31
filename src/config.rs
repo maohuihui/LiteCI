@@ -14,6 +14,7 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     pub setup_token: Option<String>,
+    pub credential_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +93,7 @@ impl Config {
             config.database.url = value.to_string_lossy().into_owned();
         }
         config.setup_token = std::env::var("LITECI_SETUP_TOKEN").ok();
+        config.credential_key = std::env::var("LITECI_CREDENTIAL_KEY").ok();
         Ok(config)
     }
 }

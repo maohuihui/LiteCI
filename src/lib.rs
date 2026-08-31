@@ -1,6 +1,9 @@
 mod auth;
 mod command_executor;
 mod config;
+mod credential_api;
+mod credential_store;
+mod credentials;
 mod db;
 mod git;
 mod projects;
@@ -9,7 +12,11 @@ pub use command_executor::{
     CommandError, CommandExecutor, CommandOutput, CommandSpec, ExecutionStatus, LogEvent, LogStream,
 };
 pub use config::{Config, StorageConfig};
-pub use git::{GitError, GitService, GitSnapshot};
+pub use credential_store::{
+    CredentialKind, CredentialStore, CredentialStoreError, CredentialSummary, NewCredential,
+};
+pub use credentials::{CredentialCipher, CredentialError};
+pub use git::{GitCredential, GitError, GitService, GitSnapshot};
 
 use axum::{
     Json, Router,
@@ -27,22 +34,7 @@ pub struct AppState {
     password_workers: Arc<Semaphore>,
     setup_token: Arc<str>,
     workspace_root: Arc<std::path::PathBuf>,
-}
-
-impl AppState {
-    fn new(
-        pool: SqlitePool,
-        setup_token: impl Into<Arc<str>>,
-        workspace_root: impl Into<std::path::PathBuf>,
-    ) -> Self {
-        Self {
-            pool,
-            login_limiter: Arc::new(auth::LoginLimiter::default()),
-            password_workers: Arc::new(Semaphore::new(4)),
-            setup_token: setup_token.into(),
-            workspace_root: Arc::new(workspace_root.into()),
-        }
-    }
+    pub(crate) credentials: Option<Arc<CredentialStore>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +67,14 @@ pub fn app_with_setup_token_and_workspace(
     setup_token: impl Into<Arc<str>>,
     workspace_root: impl Into<std::path::PathBuf>,
 ) -> Router {
+    let state = AppState {
+        pool,
+        login_limiter: Arc::new(auth::LoginLimiter::default()),
+        password_workers: Arc::new(Semaphore::new(4)),
+        setup_token: setup_token.into(),
+        workspace_root: Arc::new(workspace_root.into()),
+        credentials: None,
+    };
     Router::new()
         .route("/health", get(health))
         .route("/api/auth/setup", post(auth::setup))
@@ -89,7 +89,46 @@ pub fn app_with_setup_token_and_workspace(
                 .delete(projects::delete),
         )
         .route("/api/projects/{id}/sync", post(projects::sync))
-        .with_state(AppState::new(pool, setup_token, workspace_root))
+        .with_state(state)
+}
+
+pub fn app_with_setup_token_workspace_and_cipher(
+    pool: SqlitePool,
+    setup_token: impl Into<Arc<str>>,
+    workspace_root: impl Into<std::path::PathBuf>,
+    cipher: CredentialCipher,
+) -> Router {
+    let credentials = Arc::new(CredentialStore::new(pool.clone(), cipher));
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/auth/setup", post(auth::setup))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/me", get(auth::current_user))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/projects", get(projects::list).post(projects::create))
+        .route(
+            "/api/projects/{id}",
+            get(projects::get)
+                .put(projects::update)
+                .delete(projects::delete),
+        )
+        .route("/api/projects/{id}/sync", post(projects::sync))
+        .route(
+            "/api/credentials",
+            get(credential_api::list).post(credential_api::create),
+        )
+        .route(
+            "/api/credentials/{id}",
+            axum::routing::delete(credential_api::delete),
+        )
+        .with_state(AppState {
+            pool,
+            login_limiter: Arc::new(auth::LoginLimiter::default()),
+            password_workers: Arc::new(Semaphore::new(4)),
+            setup_token: setup_token.into(),
+            workspace_root: Arc::new(workspace_root.into()),
+            credentials: Some(credentials),
+        })
 }
 
 pub use db::{connect, migrate};
