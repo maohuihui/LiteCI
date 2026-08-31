@@ -38,14 +38,43 @@ impl PipelineEngine {
     }
 
     pub async fn cancel(&self, run_id: &str) -> bool {
-        self.running
+        if let Some(cancellation) = self
+            .running
             .lock()
             .ok()
             .and_then(|running| running.get(run_id).cloned())
-            .is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
+        {
+            cancellation.cancel();
+            return true;
+        }
+        let mut transaction = match self.pool.begin().await {
+            Ok(transaction) => transaction,
+            Err(_) => return false,
+        };
+        let result = match sqlx::query(
+            "UPDATE pipeline_runs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return false,
+        };
+        if result.rows_affected() == 0 {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        let stages = sqlx::query(
+            "UPDATE stage_runs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE run_id = ?1 AND status = 'pending'",
+        )
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await;
+        if stages.is_err() || transaction.commit().await.is_err() {
+            return false;
+        }
+        true
     }
 
     pub async fn execute(&self, run_id: &str) -> Result<(), PipelineEngineError> {
@@ -58,11 +87,6 @@ impl PipelineEngine {
     }
 
     async fn execute_inner(&self, run_id: &str) -> Result<(), PipelineEngineError> {
-        let _permit = self
-            .concurrency
-            .acquire()
-            .await
-            .map_err(|_| PipelineEngineError::Closed)?;
         let project_id: String = sqlx::query_scalar(
             "SELECT project_id FROM pipeline_runs WHERE id = ?1 AND status = 'pending'",
         )
@@ -71,6 +95,11 @@ impl PipelineEngine {
         .await?
         .ok_or(PipelineEngineError::NotPending)?;
         let _project_permit = self.project_permit(&project_id).await?;
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|_| PipelineEngineError::Closed)?;
         let claimed = sqlx::query("UPDATE pipeline_runs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'pending'")
             .bind(run_id)
             .execute(&self.pool)
