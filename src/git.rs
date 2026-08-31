@@ -116,10 +116,7 @@ impl GitService {
             )
             .await?;
         } else {
-            let clone_target = path_string(&workspace);
-            if directory_is_empty(&workspace)? {
-                std::fs::remove_dir(&workspace)?;
-            }
+            let clone_target = ".";
             self.run_git(
                 &[
                     "clone",
@@ -128,9 +125,9 @@ impl GitService {
                     branch,
                     "--single-branch",
                     repository,
-                    &clone_target,
+                    clone_target,
                 ],
-                &workspace_parent(&workspace),
+                &workspace,
                 cancellation.clone(),
                 &auth.environment,
             )
@@ -357,10 +354,6 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn directory_is_empty(path: &Path) -> Result<bool, std::io::Error> {
-    Ok(std::fs::read_dir(path)?.next().is_none())
-}
-
 #[cfg(unix)]
 fn quote_command_path(path: &Path) -> String {
     format!("'{}'", shell_quote(&path_string(path)))
@@ -377,12 +370,6 @@ fn absolute_path(path: &Path) -> Result<PathBuf, std::io::Error> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
-}
-
-fn workspace_parent(path: &Path) -> PathBuf {
-    path.parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn same_repository(expected: &str, actual: &str) -> bool {
