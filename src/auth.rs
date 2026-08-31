@@ -58,7 +58,7 @@ pub struct LoginResponse {
 
 #[derive(Debug, Serialize)]
 pub struct CurrentUserResponse {
-    id: String,
+    pub(crate) id: String,
     username: String,
     role: String,
 }

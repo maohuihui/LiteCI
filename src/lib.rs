@@ -6,6 +6,8 @@ mod credential_store;
 mod credentials;
 mod db;
 mod git;
+mod pipeline_runs;
+mod pipelines;
 mod projects;
 
 pub use command_executor::{
@@ -89,6 +91,18 @@ pub fn app_with_setup_token_and_workspace(
                 .delete(projects::delete),
         )
         .route("/api/projects/{id}/sync", post(projects::sync))
+        .route(
+            "/api/projects/{id}/pipeline",
+            get(pipelines::get).put(pipelines::put),
+        )
+        .route(
+            "/api/projects/{id}/runs",
+            get(pipeline_runs::list).post(pipeline_runs::create),
+        )
+        .route("/api/runs/{id}", get(pipeline_runs::get))
+        .route("/api/runs/{id}/cancel", post(pipeline_runs::cancel))
+        .route("/api/runs/{id}/retry", post(pipeline_runs::retry))
+        .route("/api/runs/{id}/stages", get(pipeline_runs::stages))
         .with_state(state)
 }
 
@@ -113,6 +127,18 @@ pub fn app_with_setup_token_workspace_and_cipher(
                 .delete(projects::delete),
         )
         .route("/api/projects/{id}/sync", post(projects::sync))
+        .route(
+            "/api/projects/{id}/pipeline",
+            get(pipelines::get).put(pipelines::put),
+        )
+        .route(
+            "/api/projects/{id}/runs",
+            get(pipeline_runs::list).post(pipeline_runs::create),
+        )
+        .route("/api/runs/{id}", get(pipeline_runs::get))
+        .route("/api/runs/{id}/cancel", post(pipeline_runs::cancel))
+        .route("/api/runs/{id}/retry", post(pipeline_runs::retry))
+        .route("/api/runs/{id}/stages", get(pipeline_runs::stages))
         .route(
             "/api/credentials",
             get(credential_api::list).post(credential_api::create),
