@@ -84,6 +84,135 @@ async fn executes_enabled_stages_serially_and_marks_run_success() {
 }
 
 #[tokio::test]
+async fn git_execution_syncs_repository_before_running_stages() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-b", "main"]).await;
+    git(
+        source.path(),
+        &["config", "user.email", "test@example.invalid"],
+    )
+    .await;
+    git(source.path(), &["config", "user.name", "LiteCI Test"]).await;
+    std::fs::write(source.path().join("input.txt"), "from-git\n").unwrap();
+    git(source.path(), &["add", "input.txt"]).await;
+    git(source.path(), &["commit", "-m", "initial"]).await;
+
+    let (pool, workspace, run_id) = fixture(&[(
+        "read-git",
+        shell(&copy_script("input.txt", "output.txt")),
+        true,
+        30,
+    )])
+    .await;
+    sqlx::query(
+        "UPDATE projects SET git_url = ?1 WHERE id = '11111111-1111-4111-8111-111111111111'",
+    )
+    .bind(source.path().to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let engine = PipelineEngine::new(pool.clone(), workspace.path(), 1);
+
+    engine.execute_with_git(&run_id).await.unwrap();
+
+    let run_workspace = workspace
+        .path()
+        .join("11111111-1111-4111-8111-111111111111")
+        .join(&run_id);
+    assert_eq!(
+        std::fs::read_to_string(run_workspace.join("output.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "from-git\n"
+    );
+    let commit_sha: Option<String> =
+        sqlx::query_scalar("SELECT commit_sha FROM pipeline_runs WHERE id = ?1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(commit_sha.is_some());
+}
+
+#[tokio::test]
+async fn git_execution_rejects_a_credential_with_an_incompatible_repository_type() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-b", "main"]).await;
+    git(
+        source.path(),
+        &["config", "user.email", "test@example.invalid"],
+    )
+    .await;
+    git(source.path(), &["config", "user.name", "LiteCI Test"]).await;
+    std::fs::write(source.path().join("input.txt"), "from-git\n").unwrap();
+    git(source.path(), &["add", "input.txt"]).await;
+    git(source.path(), &["commit", "-m", "initial"]).await;
+
+    let (pool, workspace, run_id) = fixture(&[(
+        "read-git",
+        shell(&copy_script("input.txt", "output.txt")),
+        true,
+        30,
+    )])
+    .await;
+    let store = liteci::CredentialStore::new(
+        pool.clone(),
+        liteci::CredentialCipher::from_key_bytes(&[5_u8; 32]).unwrap(),
+    );
+    let credential = store
+        .create(liteci::NewCredential {
+            name: "wrong-kind".into(),
+            kind: liteci::CredentialKind::SshKey,
+            payload: b"private-key".to_vec(),
+        })
+        .await
+        .unwrap();
+    let engine = PipelineEngine::new(pool.clone(), workspace.path(), 1).with_credentials(store);
+    sqlx::query("UPDATE projects SET git_url = ?1, git_auth_id = ?2 WHERE id = '11111111-1111-4111-8111-111111111111'")
+        .bind(source.path().to_string_lossy().as_ref())
+        .bind(&credential.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(engine.execute_with_git(&run_id).await.is_err());
+}
+
+#[tokio::test]
+async fn git_failure_fails_run_and_skips_user_stages() {
+    let (pool, workspace, run_id) =
+        fixture(&[("never", shell(success_script("never.txt")), true, 30)]).await;
+    sqlx::query("UPDATE projects SET git_url = 'not-a-valid-repository' WHERE id = '11111111-1111-4111-8111-111111111111'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let engine = PipelineEngine::new(pool.clone(), workspace.path(), 1);
+
+    assert!(engine.execute_with_git(&run_id).await.is_err());
+
+    let run_status: String = sqlx::query_scalar("SELECT status FROM pipeline_runs WHERE id = ?1")
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(run_status, "failed");
+    let stage_status: String =
+        sqlx::query_scalar("SELECT status FROM stage_runs WHERE id = 'stage-0'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stage_status, "skipped");
+    assert!(
+        !workspace
+            .path()
+            .join("11111111-1111-4111-8111-111111111111")
+            .join(&run_id)
+            .join("never.txt")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn stops_after_a_failed_stage_and_skips_remaining_stages() {
     let (pool, workspace, run_id) = fixture(&[
         ("failure", process(test_program(), failure_args()), true, 30),
@@ -156,6 +285,39 @@ async fn cancellation_stops_the_running_stage_and_converges_statuses() {
             .unwrap();
     assert_eq!(statuses, ["cancelled", "skipped"]);
     assert!(!workspace.path().join("11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/never.txt").exists());
+}
+
+#[tokio::test]
+async fn duplicate_execution_does_not_fail_the_active_run() {
+    let (pool, workspace, run_id) = fixture(&[("slow", shell(slow_script()), true, 30)]).await;
+    let engine = PipelineEngine::new(pool.clone(), workspace.path(), 1);
+    let first = {
+        let engine = engine.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move { engine.execute(&run_id).await })
+    };
+    wait_for_status(&pool, "stage-0", "running").await;
+
+    let duplicate = {
+        let engine = engine.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move { engine.execute(&run_id).await })
+    };
+    assert!(engine.cancel(&run_id).await);
+    first.await.unwrap().unwrap();
+    let duplicate_result = duplicate.await.unwrap();
+    assert!(matches!(
+        duplicate_result,
+        Err(liteci::PipelineEngineError::AlreadyRunning)
+            | Err(liteci::PipelineEngineError::NotPending)
+    ));
+
+    let run_status: String = sqlx::query_scalar("SELECT status FROM pipeline_runs WHERE id = ?1")
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(run_status, "cancelled");
 }
 
 #[tokio::test]
@@ -235,6 +397,26 @@ async fn invalid_stage_command_fails_the_run_and_skips_remaining_stages() {
             .await
             .unwrap();
     assert_eq!(statuses, ["failed", "skipped"]);
+}
+
+async fn git(directory: &std::path::Path, args: &[&str]) {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "git failed: {:?}", output);
+}
+
+#[cfg(windows)]
+fn copy_script(source: &str, target: &str) -> String {
+    format!("type {source} > {target}")
+}
+
+#[cfg(not(windows))]
+fn copy_script(source: &str, target: &str) -> String {
+    format!("cp {source} {target}")
 }
 
 #[cfg(windows)]

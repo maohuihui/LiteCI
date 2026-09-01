@@ -20,7 +20,7 @@ pub use credential_store::{
 };
 pub use credentials::{CredentialCipher, CredentialError};
 pub use git::{GitCredential, GitError, GitService, GitSnapshot};
-pub use pipeline_engine::PipelineEngine;
+pub use pipeline_engine::{PipelineEngine, PipelineEngineError};
 
 use axum::{
     Json, Router,

@@ -72,6 +72,32 @@ async fn git_service_does_not_modify_a_non_empty_workspace() {
     assert!(!workspace.join(".git").exists());
 }
 
+#[tokio::test]
+async fn git_service_rejects_a_symlinked_git_metadata_path() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("run");
+    std::fs::create_dir(&workspace).unwrap();
+    let external = workspace_root.path().join("external-git");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(
+        workspace.join(".git"),
+        format!("gitdir: {}\n", external.display()),
+    )
+    .unwrap();
+
+    let result = GitService::new(CommandExecutor::new())
+        .sync(
+            &source.path().to_string_lossy(),
+            "main",
+            workspace,
+            CancellationToken::new(),
+        )
+        .await;
+
+    assert!(result.is_err());
+}
+
 async fn git(directory: &std::path::Path, args: &[&str]) {
     let status = tokio::process::Command::new("git")
         .args(args)

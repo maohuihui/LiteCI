@@ -217,7 +217,15 @@ pub async fn sync(
         .await?
         .ok_or(ProjectError::NotFound)?;
     let workspace_relative = safe_workspace_path(&project.workspace_path)?;
+    let workspace_root = std::fs::canonicalize(&*state.workspace_root)
+        .map_err(|_| ProjectError::InvalidWorkspace)?;
     let workspace = state.workspace_root.join(workspace_relative);
+    std::fs::create_dir_all(&workspace).map_err(|_| ProjectError::InvalidWorkspace)?;
+    let workspace =
+        std::fs::canonicalize(&workspace).map_err(|_| ProjectError::InvalidWorkspace)?;
+    if !workspace.starts_with(&workspace_root) {
+        return Err(ProjectError::InvalidWorkspace);
+    }
     let credential = if let Some(id) = project.git_auth_id.as_deref() {
         let store = state
             .credentials

@@ -76,9 +76,17 @@ impl GitService {
             return Err(GitError::InvalidRepository);
         }
         let workspace = absolute_path(&workspace)?;
+        validate_workspace_parent_chain(&workspace)?;
         std::fs::create_dir_all(&workspace)?;
         let auth = GitAuth::prepare(repository, credential)?;
-        let workspace_is_repository = workspace.join(".git").exists();
+        let workspace_is_repository = match std::fs::symlink_metadata(workspace.join(".git")) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(GitError::InvalidWorkspace);
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
         if workspace_is_repository {
             self.verify_origin(
                 repository,
@@ -372,6 +380,23 @@ fn quote_command_path(path: &Path) -> String {
     format!("\"{}\"", path_string(path).replace('"', "\\\""))
 }
 
+fn validate_workspace_parent_chain(path: &Path) -> Result<(), GitError> {
+    let mut current = path.parent();
+    while let Some(value) = current {
+        match std::fs::symlink_metadata(value) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(GitError::InvalidWorkspace);
+            }
+            Ok(_) => current = value.parent(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = value.parent();
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn absolute_path(path: &Path) -> Result<PathBuf, std::io::Error> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -440,7 +465,9 @@ pub enum GitError {
     InvalidCredential,
     #[error("Git 工作区来源与项目仓库不一致")]
     RepositoryMismatch,
-    #[error("Git 命令执行失败: {stderr}")]
+    #[error("Git 工作区无效")]
+    InvalidWorkspace,
+    #[error("Git 命令执行失败")]
     CommandFailed {
         status: ExecutionStatus,
         stderr: String,

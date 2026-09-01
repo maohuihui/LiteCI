@@ -9,13 +9,14 @@ use sqlx::SqlitePool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{CommandExecutor, CommandSpec, ExecutionStatus};
+use crate::{CommandExecutor, CommandSpec, ExecutionStatus, GitService};
 
 #[derive(Clone)]
 pub struct PipelineEngine {
     pool: SqlitePool,
     workspace_root: Arc<PathBuf>,
     executor: CommandExecutor,
+    credentials: Option<crate::CredentialStore>,
     concurrency: Arc<Semaphore>,
     running: Arc<Mutex<HashMap<String, CancellationToken>>>,
     project_locks: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
@@ -31,6 +32,7 @@ impl PipelineEngine {
             pool,
             workspace_root: Arc::new(workspace_root.into()),
             executor: CommandExecutor::new(),
+            credentials: None,
             concurrency: Arc::new(Semaphore::new(max_concurrency.max(1))),
             running: Arc::new(Mutex::new(HashMap::new())),
             project_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -78,15 +80,42 @@ impl PipelineEngine {
     }
 
     pub async fn execute(&self, run_id: &str) -> Result<(), PipelineEngineError> {
-        let result = self.execute_inner(run_id).await;
-        if result.is_err() {
-            let _ = self.fail_running_run(run_id).await;
+        self.execute_mode(run_id, false).await
+    }
+
+    pub async fn execute_with_git(&self, run_id: &str) -> Result<(), PipelineEngineError> {
+        self.execute_mode(run_id, true).await
+    }
+
+    pub fn with_credentials(self, credentials: crate::CredentialStore) -> Self {
+        Self {
+            credentials: Some(credentials),
+            ..self
         }
+    }
+
+    async fn execute_mode(&self, run_id: &str, sync_git: bool) -> Result<(), PipelineEngineError> {
+        let execution = self.execute_inner(run_id, sync_git).await;
+        let result = match execution {
+            Err(PipelineEngineError::NotPending) => {
+                let _ = self.remove_running(run_id);
+                return Err(PipelineEngineError::NotPending);
+            }
+            Err(PipelineEngineError::Cancelled) => {
+                let _ = self.cancel_running_run(run_id).await;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.fail_running_run(run_id).await;
+                Err(error)
+            }
+            Ok(()) => Ok(()),
+        };
         let _ = self.remove_running(run_id);
         result
     }
 
-    async fn execute_inner(&self, run_id: &str) -> Result<(), PipelineEngineError> {
+    async fn execute_inner(&self, run_id: &str, sync_git: bool) -> Result<(), PipelineEngineError> {
         let project_id: String = sqlx::query_scalar(
             "SELECT project_id FROM pipeline_runs WHERE id = ?1 AND status = 'pending'",
         )
@@ -100,30 +129,116 @@ impl PipelineEngine {
             .acquire()
             .await
             .map_err(|_| PipelineEngineError::Closed)?;
+        let cancellation = CancellationToken::new();
+        {
+            let mut running = self
+                .running
+                .lock()
+                .map_err(|_| PipelineEngineError::Closed)?;
+            if running.contains_key(run_id) {
+                return Err(PipelineEngineError::AlreadyRunning);
+            }
+            running.insert(run_id.to_owned(), cancellation.clone());
+        }
         let claimed = sqlx::query("UPDATE pipeline_runs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'pending'")
             .bind(run_id)
             .execute(&self.pool)
             .await?;
         if claimed.rows_affected() == 0 {
+            self.remove_running(run_id)?;
             return Err(PipelineEngineError::NotPending);
+        }
+        if cancellation.is_cancelled() {
+            return Err(PipelineEngineError::Cancelled);
         }
         let stages = sqlx::query_as::<_, StageRow>("SELECT id, position, command, enabled, timeout_seconds FROM stage_runs WHERE run_id = ?1 ORDER BY position")
             .bind(run_id)
             .fetch_all(&self.pool)
             .await?;
         let workspace = prepare_workspace(&self.workspace_root, &project_id, run_id).await?;
-        let cancellation = CancellationToken::new();
-        self.running
-            .lock()
-            .map_err(|_| PipelineEngineError::Closed)?
-            .insert(run_id.to_owned(), cancellation.clone());
+        if sync_git {
+            let (repository, branch, credential_id): (String, String, Option<String>) =
+                sqlx::query_as(
+                    "SELECT projects.git_url, pipeline_runs.branch, projects.git_auth_id
+                 FROM pipeline_runs
+                 JOIN projects ON projects.id = pipeline_runs.project_id
+                 WHERE pipeline_runs.id = ?1",
+                )
+                .bind(run_id)
+                .fetch_one(&self.pool)
+                .await?;
+            let git = GitService::new(self.executor);
+            if cancellation.is_cancelled() {
+                return Err(PipelineEngineError::Cancelled);
+            }
+            let snapshot = match credential_id {
+                Some(id) => {
+                    let store = self
+                        .credentials
+                        .as_ref()
+                        .ok_or(PipelineEngineError::CredentialsUnavailable)?;
+                    let kind = store
+                        .kind(&id)
+                        .await
+                        .map_err(PipelineEngineError::CredentialStore)?;
+                    let payload = store
+                        .decrypt(&id)
+                        .await
+                        .map_err(PipelineEngineError::CredentialStore)?;
+                    let credential = match kind {
+                        crate::CredentialKind::HttpsToken => parse_https_credential(&payload)?,
+                        crate::CredentialKind::SshKey => crate::GitCredential::SshKey {
+                            private_key: String::from_utf8(payload)
+                                .map_err(|_| PipelineEngineError::InvalidCredential)?,
+                        },
+                    };
+                    git.sync_with_credential(
+                        &repository,
+                        &branch,
+                        workspace.clone(),
+                        cancellation.clone(),
+                        credential,
+                    )
+                    .await
+                    .map_err(map_git_error)?
+                }
+                None => git
+                    .sync(
+                        &repository,
+                        &branch,
+                        workspace.clone(),
+                        cancellation.clone(),
+                    )
+                    .await
+                    .map_err(map_git_error)?,
+            };
+            if cancellation.is_cancelled() {
+                return Err(PipelineEngineError::Cancelled);
+            }
+            let updated = sqlx::query(
+                "UPDATE pipeline_runs SET commit_sha = ?1 WHERE id = ?2 AND status = 'running'",
+            )
+            .bind(snapshot.commit_sha)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(PipelineEngineError::StateConflict);
+            }
+        }
         for stage in stages {
             if !stage.enabled {
                 continue;
             }
+            if cancellation.is_cancelled() {
+                return Err(PipelineEngineError::Cancelled);
+            }
             let _position = stage.position;
-            sqlx::query("UPDATE stage_runs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'pending'")
+            let stage_claim = sqlx::query("UPDATE stage_runs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'pending'")
                 .bind(&stage.id).execute(&self.pool).await?;
+            if stage_claim.rows_affected() != 1 {
+                return Err(PipelineEngineError::StateConflict);
+            }
             let command: StageCommand = serde_json::from_str(&stage.command)
                 .map_err(|error| PipelineEngineError::InvalidCommand(error.to_string()))?;
             let timeout = u64::try_from(stage.timeout_seconds)
@@ -132,7 +247,7 @@ impl PipelineEngine {
             let output = self.executor.execute(command, cancellation.clone()).await?;
             let (status, failed) = match output.status {
                 ExecutionStatus::Success => ("success", false),
-                ExecutionStatus::Cancelled => ("cancelled", true),
+                ExecutionStatus::Cancelled => return Err(PipelineEngineError::Cancelled),
                 ExecutionStatus::TimedOut | ExecutionStatus::Failed => ("failed", true),
             };
             sqlx::query(
@@ -143,6 +258,9 @@ impl PipelineEngine {
             .execute(&self.pool)
             .await?;
             if failed {
+                if status == "cancelled" {
+                    return Err(PipelineEngineError::Cancelled);
+                }
                 sqlx::query("UPDATE stage_runs SET status = 'skipped', finished_at = CURRENT_TIMESTAMP WHERE run_id = ?1 AND status = 'pending'")
                     .bind(run_id).execute(&self.pool).await?;
                 sqlx::query("UPDATE pipeline_runs SET status = ?1, finished_at = CURRENT_TIMESTAMP WHERE id = ?2")
@@ -150,8 +268,14 @@ impl PipelineEngine {
                 return Ok(());
             }
         }
-        sqlx::query("UPDATE pipeline_runs SET status = 'success', finished_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'running'")
+        if cancellation.is_cancelled() {
+            return Err(PipelineEngineError::Cancelled);
+        }
+        let updated = sqlx::query("UPDATE pipeline_runs SET status = 'success', finished_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'running'")
             .bind(run_id).execute(&self.pool).await?;
+        if updated.rows_affected() != 1 {
+            return Err(PipelineEngineError::StateConflict);
+        }
         Ok(())
     }
 
@@ -166,6 +290,23 @@ impl PipelineEngine {
             .execute(&mut *transaction)
             .await?;
         sqlx::query("UPDATE pipeline_runs SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'running'")
+            .bind(run_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await
+    }
+
+    async fn cancel_running_run(&self, run_id: &str) -> Result<(), sqlx::Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE stage_runs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE run_id = ?1 AND status = 'running'")
+            .bind(run_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE stage_runs SET status = 'skipped', finished_at = CURRENT_TIMESTAMP WHERE run_id = ?1 AND status = 'pending'")
+            .bind(run_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE pipeline_runs SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status = 'running'")
             .bind(run_id)
             .execute(&mut *transaction)
             .await?;
@@ -196,10 +337,11 @@ impl PipelineEngine {
     }
 
     fn remove_running(&self, run_id: &str) -> Result<(), PipelineEngineError> {
-        self.running
+        let mut running = self
+            .running
             .lock()
-            .map_err(|_| PipelineEngineError::Closed)?
-            .remove(run_id);
+            .map_err(|_| PipelineEngineError::Closed)?;
+        running.remove(run_id);
         Ok(())
     }
 }
@@ -266,6 +408,53 @@ pub enum PipelineEngineError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Executor(#[from] crate::CommandError),
+    #[error(transparent)]
+    Git(#[from] crate::GitError),
+    #[error(transparent)]
+    CredentialStore(#[from] crate::CredentialStoreError),
+    #[error("凭证存储不可用")]
+    CredentialsUnavailable,
+    #[error("Git 凭证格式无效")]
+    InvalidCredential,
+    #[error("运行已被执行")]
+    AlreadyRunning,
+    #[error("运行状态冲突")]
+    StateConflict,
+    #[error("运行已取消")]
+    Cancelled,
+}
+
+fn map_git_error(error: crate::GitError) -> PipelineEngineError {
+    match error {
+        crate::GitError::CommandFailed {
+            status: crate::ExecutionStatus::Cancelled,
+            ..
+        } => PipelineEngineError::Cancelled,
+        other => PipelineEngineError::Git(other),
+    }
+}
+
+fn parse_https_credential(payload: &[u8]) -> Result<crate::GitCredential, PipelineEngineError> {
+    let value =
+        String::from_utf8(payload.to_vec()).map_err(|_| PipelineEngineError::InvalidCredential)?;
+    let mut username = None;
+    let mut token = None;
+    for line in value.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(PipelineEngineError::InvalidCredential);
+        };
+        match key {
+            "username" if username.is_none() => username = Some(value.to_owned()),
+            "token" if token.is_none() => token = Some(value.to_owned()),
+            _ => return Err(PipelineEngineError::InvalidCredential),
+        }
+    }
+    match (username, token) {
+        (Some(username), Some(token)) if !username.is_empty() && !token.is_empty() => {
+            Ok(crate::GitCredential::HttpsToken { username, token })
+        }
+        _ => Err(PipelineEngineError::InvalidCredential),
+    }
 }
 
 async fn prepare_workspace(
