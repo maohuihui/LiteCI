@@ -49,6 +49,7 @@ pub struct StageRun {
     pub enabled: bool,
     pub status: String,
     pub timeout_seconds: i64,
+    pub logs_truncated: bool,
     pub created_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -64,6 +65,7 @@ struct StoredStageRun {
     enabled: bool,
     status: String,
     timeout_seconds: i64,
+    logs_truncated: bool,
     created_at: String,
     started_at: Option<String>,
     finished_at: Option<String>,
@@ -150,7 +152,7 @@ pub async fn stages(
     auth::authenticated_user(&state, &headers).await?;
     find(&state, &id).await?;
     let stages = sqlx::query_as::<_, StoredStageRun>(
-        "SELECT id, run_id, position, name, command, enabled, status, timeout_seconds, created_at, started_at, finished_at FROM stage_runs WHERE run_id = ?1 ORDER BY position",
+        "SELECT id, run_id, position, name, command, enabled, status, timeout_seconds, logs_truncated, created_at, started_at, finished_at FROM stage_runs WHERE run_id = ?1 ORDER BY position",
     )
     .bind(id)
     .fetch_all(&state.pool)
@@ -175,6 +177,7 @@ impl TryFrom<StoredStageRun> for StageRun {
             enabled: stage.enabled,
             status: stage.status,
             timeout_seconds: stage.timeout_seconds,
+            logs_truncated: stage.logs_truncated,
             created_at: stage.created_at,
             started_at: stage.started_at,
             finished_at: stage.finished_at,

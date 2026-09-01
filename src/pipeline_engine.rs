@@ -6,7 +6,7 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{CommandExecutor, CommandSpec, ExecutionStatus, GitService};
@@ -244,7 +244,27 @@ impl PipelineEngine {
             let timeout = u64::try_from(stage.timeout_seconds)
                 .map_err(|_| PipelineEngineError::InvalidTimeout)?;
             let command = command.into_spec(workspace.clone(), Duration::from_secs(timeout));
-            let output = self.executor.execute(command, cancellation.clone()).await?;
+            let (log_sender, log_receiver) = mpsc::channel::<crate::LogEvent>(64);
+            let log_pool = self.pool.clone();
+            let log_stage_id = stage.id.clone();
+            let log_writer = tokio::spawn(crate::pipeline_log_store::persist_stage_logs(
+                log_pool,
+                log_stage_id,
+                log_receiver,
+            ));
+            let output = self
+                .executor
+                .execute_with_logs(command, cancellation.clone(), log_sender)
+                .await;
+            let logs_truncated = log_writer
+                .await
+                .map_err(|_| PipelineEngineError::Closed)??;
+            let output = output?;
+            sqlx::query("UPDATE stage_runs SET logs_truncated = ?1 WHERE id = ?2")
+                .bind(logs_truncated)
+                .bind(&stage.id)
+                .execute(&self.pool)
+                .await?;
             let (status, failed) = match output.status {
                 ExecutionStatus::Success => ("success", false),
                 ExecutionStatus::Cancelled => return Err(PipelineEngineError::Cancelled),

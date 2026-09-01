@@ -237,10 +237,15 @@ async fn read_bounded(
             break;
         }
         if let Some(sender) = &logs {
-            let _ = sender.try_send(LogEvent {
-                stream,
-                data: buffer[..count].to_vec(),
-            });
+            sender
+                .send(LogEvent {
+                    stream,
+                    data: buffer[..count].to_vec(),
+                })
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "log sink closed")
+                })?;
         }
         let remaining = limit.saturating_sub(retained.len());
         let retained_count = remaining.min(count);
