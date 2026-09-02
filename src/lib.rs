@@ -1,3 +1,6 @@
+mod artifact_files;
+mod pipeline_artifacts;
+pub use artifact_files::{ArtifactError, collect_file};
 mod auth;
 mod command_executor;
 mod config;
@@ -108,6 +111,7 @@ pub fn app_with_setup_token_and_workspace(
         .route("/api/runs/{id}/retry", post(pipeline_runs::retry))
         .route("/api/runs/{id}/stages", get(pipeline_runs::stages))
         .route("/api/runs/{id}/logs", get(pipeline_logs::logs))
+        .route("/api/runs/{id}/artifacts", get(pipeline_artifacts::list))
         .with_state(state)
 }
 
@@ -145,6 +149,7 @@ pub fn app_with_setup_token_workspace_and_cipher(
         .route("/api/runs/{id}/retry", post(pipeline_runs::retry))
         .route("/api/runs/{id}/stages", get(pipeline_runs::stages))
         .route("/api/runs/{id}/logs", get(pipeline_logs::logs))
+        .route("/api/runs/{id}/artifacts", get(pipeline_artifacts::list))
         .route(
             "/api/credentials",
             get(credential_api::list).post(credential_api::create),
